@@ -1,0 +1,245 @@
+<sdf version="1.9">
+  <world name="maze_world">
+
+    <!-- Lighting -->
+    <light type="directional" name="sun">
+      <pose>0 0 15 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+    </light>
+
+    <!-- Ground (dark for contrast) -->
+    <model name="ground">
+      <static>true</static>
+      <link name="link">
+        <collision name="col">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>50 50</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="vis">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>50 50</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.1 0.1 0.1 1</ambient>
+            <diffuse>0.2 0.2 0.2 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- WALL TEMPLATE -->
+    <!-- thickness = 0.2, height = 1 -->
+
+    <!-- Outer boundary -->
+    <!-- Top -->
+    <model name="wall_top">
+      <static>true</static>
+      <pose>0 10 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>16 0.2 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>16 0.2 3</size></box></geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Bottom -->
+    <model name="wall_bottom">
+      <static>true</static>
+      <pose>0 -10 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>20 0.2 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>20 0.2 3</size></box></geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Left -->
+    <model name="wall_left">
+      <static>true</static>
+      <pose>-10 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 20 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 20 3</size></box></geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Right -->
+    <model name="wall_right">
+      <static>true</static>
+      <pose>10 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 20 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 20 3</size></box></geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- INNER MAZE (DFS-generated pattern, 2m grid) -->
+    <!-- Blue walls for contrast -->
+
+    <model name="m1">
+      <static>true</static>
+      <pose>0 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>14.25 0.2 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>14.25 0.2 3</size></box></geometry>
+          <material>
+            <ambient>0.3 0.6 1.0 1</ambient>
+            <diffuse>0.4 0.7 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="m2">
+      <static>true</static>
+      <pose>3.5 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 10 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 10 3</size></box></geometry>
+          <material>
+            <ambient>0.3 0.6 1.0 1</ambient>
+            <diffuse>0.4 0.7 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="m3">
+      <static>true</static>
+      <pose>0 6.5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 7 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 7 3</size></box></geometry>
+          <material>
+            <ambient>0.3 0.6 1.0 1</ambient>
+              <diffuse>0.4 0.7 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="m4">
+      <static>true</static>
+      <pose>-6.5 7 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>6.5 0.2 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>6.5 0.2 3</size></box></geometry>
+          <material>
+            <ambient>0.3 0.6 1.0 1</ambient>
+              <diffuse>0.4 0.7 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="m5">
+      <static>true</static>
+      <pose>0 -6.5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 7 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 7 3</size></box></geometry>
+          <material>
+            <ambient>0.3 0.6 1.0 1</ambient>
+              <diffuse>0.4 0.7 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="m6">
+      <static>true</static>
+      <pose>-7 -7 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>6 0.2 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>6 0.2 3</size></box></geometry>
+          <material>
+            <ambient>0.3 0.6 1.0 1</ambient>
+              <diffuse>0.4 0.7 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="m7">
+      <static>true</static>
+      <pose>7 5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 10 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 10 3</size></box></geometry>
+          <material>
+            <ambient>0.3 0.6 1.0 1</ambient>
+              <diffuse>0.4 0.7 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="m8">
+      <static>true</static>
+      <pose>7 -7 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 6 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 6 3</size></box></geometry>
+          <material>
+            <ambient>0.3 0.6 1.0 1</ambient>
+              <diffuse>0.4 0.7 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="m9">
+      <static>true</static>
+      <pose>-4 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 8 3</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.2 8 3</size></box></geometry>
+          <material>
+            <ambient>0.3 0.6 1.0 1</ambient>
+            <diffuse>0.4 0.7 1.0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+
+  </world>
+</sdf>

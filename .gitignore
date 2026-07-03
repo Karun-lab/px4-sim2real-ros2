@@ -1,0 +1,11 @@
+# Python tracking
+__pycache__/
+*.pyc
+
+# ROS 2 build artifacts (if any sneak in)
+build/
+install/
+log/
+
+# OS files
+.DS_Store
