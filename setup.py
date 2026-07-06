@@ -32,6 +32,8 @@ setup(
             "rl_inference_node=sim2real.rl_inference_node:main",
             "tello_node = sim2real.tello_node:main",
             "flight_test_offboard=sim2real.flight_test_offboard:main",
+            "ICM_Inference=sim2real.ICM_Inference:main",
+            "tello_icm_bridge_node=sim2real.tello_icm_bridge_node:main",
         ],
     },
 )

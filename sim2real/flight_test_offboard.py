@@ -20,7 +20,7 @@ class PX4TaskTest(Node):
         self.timer_period = 0.05    # 20 Hz loop rate
         
         # Task specific variables
-        self.forward_distance = 2.0  # 2 meters forward
+        self.forward_distance = 1.0  # 2 meters forward
         self.yaw_speed = math.radians(45)  # Rotate at 45 deg/s
 
         # --- State Tracking ---
@@ -113,8 +113,8 @@ class PX4TaskTest(Node):
         # --- EXECUTE SELECTED TASK ---
         if self.task == "forward":
             # Move 2m forward along the local X-axis
-            sp.position[0] = self.home_x + self.forward_distance
-            sp.position[1] = self.home_y
+            sp.position[1] = self.home_x + self.forward_distance
+            sp.position[0] = self.home_y
             sp.yaw = 0.0
 
         elif self.task == "yaw_360":

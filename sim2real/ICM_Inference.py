@@ -148,8 +148,8 @@ class IrisICMInferenceNode(Node):
         super().__init__("iris_icm_inference_node")
 
         # ---- parameters ----
-        self.declare_parameter("checkpoint_path", "/home/user/best_agent.pt")
-        self.declare_parameter("depth_topic", "/camera/depth/image_raw")
+        self.declare_parameter("checkpoint_path", "/home/user/ros2_jazzy/src/sim2real/trained_models/icm_best_agent.pt")
+        self.declare_parameter("depth_topic", "/m2h/depth/image")
         self.declare_parameter("action_topic", "/uav/action_cmd")
         self.declare_parameter("inference_rate_hz", 20.0)
         self.declare_parameter("device", "cuda" if torch.cuda.is_available() else "cpu")
