@@ -60,8 +60,8 @@ class TelloICMBridgeNode(Node):
         super().__init__("tello_icm_bridge_node")
 
         # ── Parameters ─────────────────────────────────────────────────────────
-        self.declare_parameter("max_forward_cm_s", 30)
-        self.declare_parameter("max_yaw_deg_s",    60)
+        self.declare_parameter("max_forward_cm_s", 40)
+        self.declare_parameter("max_yaw_deg_s",    30)
         self.declare_parameter("max_updown_cm_s",  0)
         self.declare_parameter("cmd_timeout_s",    0.5)
         self.declare_parameter("stream_fps",       20.0)
@@ -140,17 +140,27 @@ class TelloICMBridgeNode(Node):
         with self._lock:
             vx_n  = self._vx_norm
             yaw_n = self._yaw_norm
+            vx_n  = np.clip(vx_n  * 1.5, -1.0, 1.0)   # amplify forward
+            yaw_n = np.clip(yaw_n * 0.7, -1.0, 1.0)   # dampen yaw
             fresh = (time.time() - self._last_cmd_time) < self._cmd_to
 
         if not fresh:
             self.tello.send_rc_control(0, 0, 0, 0)
             return
 
+        # Dead zone — ignore yaw commands smaller than 0.3 in normalised space
+        # This stops the drone from constantly micro-correcting its heading
+        if abs(yaw_n) < 0.3:
+            yaw_n = 0.0
+
+        # Bias forward: only suppress forward motion if yaw is very strong (>0.7)
+        # Otherwise always push some forward velocity
+        if abs(yaw_n) < 0.7 and vx_n < 0.2:
+            vx_n = 0.2   # minimum forward nudge
+
         fwd = int(np.clip(vx_n  * self._max_fwd, -100, 100))
         yaw = int(np.clip(yaw_n * self._max_yaw, -100, 100))
         ud  = int(np.clip(self._max_ud,           -100, 100))
-
-        # send_rc_control(left_right, fwd_back, up_down, yaw)
         self.tello.send_rc_control(0, fwd, ud, yaw)
 
     # ── Video publisher ─────────────────────────────────────────────────────────

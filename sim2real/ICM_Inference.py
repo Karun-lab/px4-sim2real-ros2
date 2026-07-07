@@ -58,7 +58,7 @@ except ImportError as e:
 
 
 CAM_H, CAM_W = 64, 80
-N_CH         = 2   # checkpoint was trained with 2 channels; channel 1 fed as zeros here
+N_CH         = 1   # checkpoint was trained with 2 channels; channel 1 fed as zeros here
 HIST_LEN     = 3
 CAM_MIN_DEPTH, CAM_MAX_DEPTH = 0.2, 6.0
 
@@ -110,8 +110,8 @@ class IrisICMPolicyNet(nn.Module):
 
 
 def load_policy(checkpoint_path: str, device: torch.device) -> IrisICMPolicyNet:
-    model = IrisICMPolicyNet().to(device)
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    model = IrisICMPolicyNet(n_ch=1).to(device)
+    ckpt  = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     if isinstance(ckpt, dict) and "policy" in ckpt:
         state_dict = ckpt["policy"]
@@ -120,7 +120,7 @@ def load_policy(checkpoint_path: str, device: torch.device) -> IrisICMPolicyNet:
     else:
         state_dict = ckpt
 
-    cleaned = {}
+    cleaned   = {}
     model_keys = set(model.state_dict().keys())
     for k, v in state_dict.items():
         if k in model_keys:
@@ -148,7 +148,7 @@ class IrisICMInferenceNode(Node):
         super().__init__("iris_icm_inference_node")
 
         # ---- parameters ----
-        self.declare_parameter("checkpoint_path", "/home/user/ros2_jazzy/src/sim2real/trained_models/icm_best_agent.pt")
+        self.declare_parameter("checkpoint_path", "/home/user/ros2_jazzy/src/sim2real/trained_models/icm_og_best_agent.pt")
         self.declare_parameter("depth_topic", "/m2h/depth/image")
         self.declare_parameter("action_topic", "/uav/action_cmd")
         self.declare_parameter("inference_rate_hz", 20.0)
@@ -171,13 +171,13 @@ class IrisICMInferenceNode(Node):
         self._latest_depth = np.full((CAM_H, CAM_W), 0.5, dtype=np.float32)  # normalised [0,1]
         self._have_depth = False
 
-        self._zero_channel = np.zeros((CAM_H, CAM_W), dtype=np.float32)
+  
+
 
         self._frame_hist = deque(maxlen=HIST_LEN)
         for _ in range(HIST_LEN):
-            self._frame_hist.append(np.stack(
-                [np.full((CAM_H, CAM_W), 0.5, dtype=np.float32), self._zero_channel], axis=-1))
-
+            self._frame_hist.append(
+                np.zeros((CAM_H, CAM_W, 1), dtype=np.float32))
         self._smooth_action = np.zeros(2, dtype=np.float32)
 
         # ---- pub/sub ----
@@ -217,26 +217,24 @@ class IrisICMInferenceNode(Node):
     # ------------------------------------------------------------------
     def _step(self):
         if not self._have_depth:
-            return  # wait for first depth frame before publishing anything
+            return
 
-        frame = np.stack([self._latest_depth, self._zero_channel], axis=-1)  # (H,W,2)
+        frame = self._latest_depth[..., np.newaxis]   # (H, W, 1)
         self._frame_hist.append(frame)
 
-        obs = np.stack(list(self._frame_hist), axis=0)  # (T,H,W,2)
-        obs_t = torch.from_numpy(obs).unsqueeze(0).float().to(self.device)  # (1,T,H,W,2)
+        obs   = np.stack(list(self._frame_hist), axis=0)              # (T, H, W, 1)
+        obs_t = torch.from_numpy(obs).unsqueeze(0).float().to(self.device)
 
         mean_action = self.policy.act(obs_t).squeeze(0).cpu().numpy()
         raw = np.clip(mean_action, -1.0, 1.0)
 
-        # Reproduce the same EMA smoothing the training env applied before
-        # converting actions to velocity setpoints.
         self._smooth_action = (ACTION_ALPHA * self._smooth_action +
                                 (1.0 - ACTION_ALPHA) * raw)
 
         vx_norm, yaw_norm = self._smooth_action.tolist()
 
         msg = Twist()
-        msg.linear.x = float(vx_norm)
+        msg.linear.x  = float(vx_norm)
         msg.angular.z = float(yaw_norm)
         self.pub_action.publish(msg)
 
