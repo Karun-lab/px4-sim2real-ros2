@@ -34,6 +34,7 @@ setup(
             "flight_test_offboard=sim2real.flight_test_offboard:main",
             "ICM_Inference=sim2real.ICM_Inference:main",
             "tello_icm_bridge_node=sim2real.tello_icm_bridge_node:main",
+            "px4_icm_node=sim2real.px4_icm_node:main",
         ],
     },
 )

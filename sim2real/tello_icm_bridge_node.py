@@ -59,9 +59,9 @@ class TelloICMBridgeNode(Node):
     def __init__(self):
         super().__init__("tello_icm_bridge_node")
 
-        # ── Parameters ─────────────────────────────────────────────────────────
+        # ── Parameters ──────
         self.declare_parameter("max_forward_cm_s", 40)
-        self.declare_parameter("max_yaw_deg_s",    30)
+        self.declare_parameter("max_yaw_deg_s",    40)
         self.declare_parameter("max_updown_cm_s",  0)
         self.declare_parameter("cmd_timeout_s",    0.5)
         self.declare_parameter("stream_fps",       20.0)
@@ -82,7 +82,7 @@ class TelloICMBridgeNode(Node):
         video_topic      = self.get_parameter("video_topic").value
         action_topic     = self.get_parameter("action_topic").value
 
-        # ── Tello connection ───────────────────────────────────────────────────
+        #Tello connection 
         self.tello = Tello()
         self.tello.connect()
         bat = self.tello.get_battery()
@@ -106,14 +106,14 @@ class TelloICMBridgeNode(Node):
             time.sleep(2.0)
             self.get_logger().info("Airborne.")
 
-        # ── State ──────────────────────────────────────────────────────────────
+        #state
         self.bridge = CvBridge()
         self._last_cmd_time = time.time()
         self._vx_norm  = 0.0
         self._yaw_norm = 0.0
         self._lock = threading.Lock()
 
-        # ── ROS interfaces ─────────────────────────────────────────────────────
+        #ROS interfaces
         self.pub_video = self.create_publisher(Image, video_topic, 10)
 
         self.sub_action = self.create_subscription(
@@ -128,19 +128,19 @@ class TelloICMBridgeNode(Node):
             f"actions ← {action_topic}"
         )
 
-    # ── Action subscriber ──────────────────────────────────────────────────────
+    # ── Action subscriber ───
     def _on_action(self, msg: Twist):
         with self._lock:
-            self._vx_norm       = float(np.clip(msg.linear.x,  -1.0, 1.0))
+            self._vx_norm       = float(np.clip(msg.linear.x,  -0.2, 1.0))
             self._yaw_norm      = float(np.clip(msg.angular.z, -1.0, 1.0))
             self._last_cmd_time = time.time()
 
-    # ── Control loop ───────────────────────────────────────────────────────────
+    # ── Control loop ────────
     def _control_loop(self):
         with self._lock:
             vx_n  = self._vx_norm
             yaw_n = self._yaw_norm
-            vx_n  = np.clip(vx_n  * 1.5, -1.0, 1.0)   # amplify forward
+            vx_n  = np.clip(vx_n  * 1.4, -0.2, 1.0)   # amplify forward
             yaw_n = np.clip(yaw_n * 0.7, -1.0, 1.0)   # dampen yaw
             fresh = (time.time() - self._last_cmd_time) < self._cmd_to
 
@@ -148,9 +148,12 @@ class TelloICMBridgeNode(Node):
             self.tello.send_rc_control(0, 0, 0, 0)
             return
 
+        STRONG_FORWARD_THRESHOLD = 0.7  # Adjust this value based on testing
+        if vx_n > STRONG_FORWARD_THRESHOLD:
+            yaw_n = 0.0
         # Dead zone — ignore yaw commands smaller than 0.3 in normalised space
         # This stops the drone from constantly micro-correcting its heading
-        if abs(yaw_n) < 0.3:
+        if abs(yaw_n) < 0.4:
             yaw_n = 0.0
 
         # Bias forward: only suppress forward motion if yaw is very strong (>0.7)
@@ -158,12 +161,13 @@ class TelloICMBridgeNode(Node):
         if abs(yaw_n) < 0.7 and vx_n < 0.2:
             vx_n = 0.2   # minimum forward nudge
 
+
         fwd = int(np.clip(vx_n  * self._max_fwd, -100, 100))
         yaw = int(np.clip(yaw_n * self._max_yaw, -100, 100))
         ud  = int(np.clip(self._max_ud,           -100, 100))
         self.tello.send_rc_control(0, fwd, ud, yaw)
 
-    # ── Video publisher ─────────────────────────────────────────────────────────
+    # ── Video publisher ──────
     def _normalize_frame(self, frame) -> np.ndarray | None:
         """
         Robustly convert whatever djitellopy gives us into a contiguous
@@ -214,7 +218,7 @@ class TelloICMBridgeNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Frame publish failed: {e}", throttle_duration_sec=5.0)
 
-    # ── Cleanup ────────────────────────────────────────────────────────────────
+    # ── Cleanup ─────────────
     def shutdown(self):
         self.get_logger().info("Shutting down — landing…")
         try:

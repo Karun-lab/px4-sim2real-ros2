@@ -66,10 +66,15 @@ class PX4TaskTest(Node):
             self.home_x = msg.x
             self.home_y = msg.y
             self.home_z = msg.z
+            # Lock the heading the drone was born with/started with
+            self.home_yaw = msg.heading 
             self.have_home = True
-            self.get_logger().info(f"Home position established: X={self.home_x:.2f}, Y={self.home_y:.2f}")
+            self.get_logger().info(f"Home established. Initial Yaw: {math.degrees(self.home_yaw):.1f}°")
+            # self.have_home = True
+            # self.get_logger().info(f"Home position established: X={self.home_x:.2f}, Y={self.home_y:.2f}")
 
         # 2. Track current orientation (PX4 uses heading/yaw in radians)
+        
         self.current_yaw = msg.heading
 
     def publish_offboard_heartbeat(self):
@@ -111,11 +116,18 @@ class PX4TaskTest(Node):
             return
 
         # --- EXECUTE SELECTED TASK ---
+        # if self.task == "forward":
+        #     # Move 2m forward along the local X-axis
+        #     sp.position[0] = self.home_x + self.forward_distance
+        #     sp.position[1] = self.home_y
+        #     sp.yaw = 0.0
         if self.task == "forward":
-            # Move 2m forward along the local X-axis
-            sp.position[1] = self.home_x + self.forward_distance
-            sp.position[0] = self.home_y
-            sp.yaw = 0.0
+            # Project the forward distance into the local NED frame using the initial heading
+            sp.position[0] = self.home_x + (self.forward_distance * math.cos(self.home_yaw)) # Delta North
+            sp.position[1] = self.home_y + (self.forward_distance * math.sin(self.home_yaw)) # Delta East
+            
+            # Keep the heading locked to what it was at startup (don't force it to 0/North)
+            sp.yaw = self.home_yaw
 
         elif self.task == "yaw_360":
             # Hold current position position
