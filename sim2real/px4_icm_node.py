@@ -160,7 +160,7 @@ class PX4ICMOffboardNode(Node):
             Twist, "/uav/action_cmd",
             self._on_action, 10)
         self.create_subscription(
-            VehicleLocalPosition, "/fmu/out/vehicle_local_position",
+            VehicleLocalPosition, "/fmu/out/vehicle_local_position_v1",
             self._on_local_pos, PX4_QOS)
         self.create_subscription(
             VehicleStatus, "/fmu/out/vehicle_status",
