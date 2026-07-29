@@ -72,8 +72,8 @@ class PX4ICMOffboardNode(Node):
         # ── Parameters ──────────────────────────────────────────────────────
         self.declare_parameter("max_forward_m_s",    0.5)
         self.declare_parameter("max_yaw_rate_rad_s", 0.5)
-        self.declare_parameter("target_alt_m",       1.5)
-        self.declare_parameter("alt_kp",             0.4)
+        self.declare_parameter("target_alt_m",       2.0)
+        self.declare_parameter("alt_kp",             0.6)
         self.declare_parameter("max_vz_m_s",         0.5)
         self.declare_parameter("cmd_timeout_s",      0.5)
         self.declare_parameter("land_timeout_s",     3.0)
