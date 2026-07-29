@@ -2,12 +2,8 @@
 """
 px4_icm_offboard_node.py
 =========================
-ROS 2 offboard control node for a PX4 drone driven by the ICM exploration
-inference node. Mirrors the structure of tello_icm_bridge_node.py.
-
-NO video streaming. NO auto-arming. NO auto-takeoff.
-Operator arms and switches to OFFBOARD manually (RC or QGC) at ~1.2 m.
-This node then holds altitude and forwards ICM action commands.
+ROS 2 offboard control node for a PX4 drone driven by ICM exploration.
+Fixed heading interpretation and velocity scaling for optical flow localization.
 
 Subscribes:
     /uav/action_cmd  (geometry_msgs/Twist) — normalised ICM commands
@@ -20,55 +16,20 @@ Subscribes (from PX4 via uXRCE-DDS bridge):
 
 Publishes (to PX4 via uXRCE-DDS bridge):
     /fmu/in/offboard_control_mode    — must publish >2 Hz to stay in OFFBOARD
-    /fmu/in/trajectory_setpoint      — NED velocity + yaw rate
+    /fmu/in/trajectory_setpoint      — velocity setpoints in NED frame
     /fmu/in/vehicle_command          — LAND on safety trigger
-
-Safety behaviour
-----------------
-    cmd_timeout_s  : no /uav/action_cmd → hover (zero horizontal velocity)
-    land_timeout_s : cmd stream absent this long → send LAND and latch
-
-Parameters (all tunable via --ros-args -p or launch file)
-----------------------------------------------------------
-    max_forward_m_s       float  default 0.4    max horizontal speed (m/s)
-    max_yaw_rate_rad_s    float  default 0.3    max yaw rate (rad/s)
-    target_alt_m          float  default 1.2    altitude to hold (m, +up)
-    alt_kp                float  default 0.8    altitude P-gain (m/s per m error)
-    max_vz_m_s            float  default 0.3    max vertical correction (m/s)
-    cmd_timeout_s         float  default 0.5    hover threshold (s)
-    land_timeout_s        float  default 3.0    land threshold (s)
-    yaw_deadzone          float  default 0.15   |yaw_norm| below this → 0
-    yaw_scale             float  default 0.6    yaw damping multiplier
-    fwd_scale             float  default 1.4    forward amplification multiplier
-    min_fwd_norm          float  default 0.2    min forward push when not yawing hard
-    setpoint_rate_hz      float  default 20.0   setpoint publish rate (Hz)
-
-NED frame reminder
-------------------
-    PX4 uses North-East-Down:
-        z negative = up  →  1.2 m altitude = z = -1.2 in PX4
-        heading 0 = North, increases clockwise
-        body +X forward → NED:  vN = vx·cos(hdg),  vE = vx·sin(hdg)
-
-Dependencies
-------------
-    px4_msgs  — build from source matching your PX4 firmware, or:
-    sudo apt install ros-jazzy-px4-msgs  (if available)
 """
 
 import math
 import time
 import threading
-
 import numpy as np
-
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
     QoSProfile, QoSReliabilityPolicy,
     QoSHistoryPolicy, QoSDurabilityPolicy,
 )
-
 from geometry_msgs.msg import Twist
 
 try:
@@ -85,7 +46,7 @@ except ImportError as e:
     ) from e
 
 
-# ── QoS required by PX4 uXRCE-DDS bridge 
+# ── QoS required by PX4 uXRCE-DDS bridge ────────────────────────────────────
 PX4_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
     durability=QoSDurabilityPolicy.VOLATILE,
@@ -98,25 +59,30 @@ class PX4ICMOffboardNode(Node):
 
     # PX4 nav-state constants (VehicleStatus.nav_state)
     NAV_STATE_OFFBOARD = 14
+    NAV_STATE_ALTCTL = 5
+    NAV_STATE_POSCTL = 6
+    NAV_STATE_AUTO_LOITER = 4
+    
     # PX4 arming-state constants (VehicleStatus.arming_state)
     ARMING_STATE_ARMED = 2
 
     def __init__(self):
         super().__init__("px4_icm_offboard_node")
 
-        # ── Parameters 
-        self.declare_parameter("max_forward_m_s",    0.4)
-        self.declare_parameter("max_yaw_rate_rad_s", 0.3)
+        # ── Parameters ──────────────────────────────────────────────────────
+        self.declare_parameter("max_forward_m_s",    0.5)
+        self.declare_parameter("max_yaw_rate_rad_s", 0.5)
         self.declare_parameter("target_alt_m",       1.2)
         self.declare_parameter("alt_kp",             0.8)
-        self.declare_parameter("max_vz_m_s",         0.3)
+        self.declare_parameter("max_vz_m_s",         0.5)
         self.declare_parameter("cmd_timeout_s",      0.5)
         self.declare_parameter("land_timeout_s",     3.0)
-        self.declare_parameter("yaw_deadzone",       0.15)
-        self.declare_parameter("yaw_scale",          0.6)
-        self.declare_parameter("fwd_scale",          1.4)
-        self.declare_parameter("min_fwd_norm",       0.2)
+        self.declare_parameter("yaw_deadzone",       0.1)
+        self.declare_parameter("yaw_scale",          1.0)
+        self.declare_parameter("fwd_scale",          1.0)
+        self.declare_parameter("min_fwd_norm",       0.1)
         self.declare_parameter("setpoint_rate_hz",   20.0)
+        self.declare_parameter("use_heading",        True)  # Use heading from VIO/optical flow
 
         self._max_fwd   = float(self.get_parameter("max_forward_m_s").value)
         self._max_yaw   = float(self.get_parameter("max_yaw_rate_rad_s").value)
@@ -129,13 +95,15 @@ class PX4ICMOffboardNode(Node):
         self._yaw_scale = float(self.get_parameter("yaw_scale").value)
         self._fwd_scale = float(self.get_parameter("fwd_scale").value)
         self._min_fwd   = float(self.get_parameter("min_fwd_norm").value)
+        self._use_heading = bool(self.get_parameter("use_heading").value)
         rate_hz         = float(self.get_parameter("setpoint_rate_hz").value)
 
-        # ── State 
+        # ── State ──────────────────────────────────────────────────────────
         self._lock          = threading.Lock()
         self._vx_norm       = 0.0
+        self._vy_norm       = 0.0  # Not used by ICM, but keep for completeness
         self._yaw_norm      = 0.0
-        self._last_cmd_time = 0.0       # 0 = no command ever received
+        self._last_cmd_time = 0.0
         self._cmd_ever_recv = False
 
         # From PX4 telemetry
@@ -143,11 +111,14 @@ class PX4ICMOffboardNode(Node):
         self._current_alt   = 0.0      # metres, positive up
         self._in_offboard   = False
         self._armed         = False
+        self._alt_valid     = False
+        self._heading_valid = False
 
-        # Latched once LAND is triggered — stops further setpoints
+        # Latched once LAND is triggered
         self._landing       = False
+        self._landing_start_time = 0.0
 
-        # ── Publishers ─────────────────────────────────────────────────────────
+        # ── Publishers ──────────────────────────────────────────────────────
         self._pub_ocm = self.create_publisher(
             OffboardControlMode, "/fmu/in/offboard_control_mode", PX4_QOS)
         self._pub_sp  = self.create_publisher(
@@ -155,34 +126,32 @@ class PX4ICMOffboardNode(Node):
         self._pub_vc  = self.create_publisher(
             VehicleCommand,      "/fmu/in/vehicle_command",       PX4_QOS)
 
-        # ── Subscribers ────────────────────────────────────────────────────────
+        # ── Subscribers ────────────────────────────────────────────────────
         self.create_subscription(
             Twist, "/uav/action_cmd",
             self._on_action, 10)
         self.create_subscription(
-            VehicleLocalPosition, "/fmu/out/vehicle_local_position_v1",
+            VehicleLocalPosition, "/fmu/out/vehicle_local_position",
             self._on_local_pos, PX4_QOS)
         self.create_subscription(
             VehicleStatus, "/fmu/out/vehicle_status",
             self._on_vehicle_status, PX4_QOS)
 
-        # ── Timers ─────────────────────────────────────────────────────────────
+        # ── Timers ──────────────────────────────────────────────────────────
         self._ctrl_timer = self.create_timer(1.0 / rate_hz, self._control_loop)
-        self._diag_timer = self.create_timer(2.0,           self._log_status)
+        self._diag_timer = self.create_timer(2.0, self._log_status)
 
         self.get_logger().info(
             f"PX4 ICM Offboard node ready\n"
             f"  max_forward      = {self._max_fwd} m/s\n"
             f"  max_yaw_rate     = {self._max_yaw} rad/s\n"
             f"  target_alt       = {self._tgt_alt} m\n"
+            f"  use_heading      = {self._use_heading}\n"
             f"  cmd_timeout      = {self._cmd_to}s → hover\n"
             f"  land_timeout     = {self._land_to}s → LAND\n"
-            f"  yaw_deadzone     = {self._yaw_dz}  "
-            f"yaw_scale = {self._yaw_scale}  "
-            f"fwd_scale = {self._fwd_scale}"
         )
 
-    # ── Action subscriber ──────────────────────────────────────────────────────
+    # ── Action subscriber ────────────────────────────────────────────────────
     def _on_action(self, msg: Twist):
         with self._lock:
             self._vx_norm       = float(np.clip(msg.linear.x,  -1.0, 1.0))
@@ -190,26 +159,30 @@ class PX4ICMOffboardNode(Node):
             self._last_cmd_time = time.time()
             self._cmd_ever_recv = True
 
-    # ── PX4 telemetry ──────────────────────────────────────────────────────────
+    # ── PX4 telemetry ──────────────────────────────────────────────────────
     def _on_local_pos(self, msg: VehicleLocalPosition):
         with self._lock:
             # PX4 z is NED (negative = up). Convert to positive-up metres.
-            self._current_alt = -float(msg.z)
-            self._heading     = float(msg.heading)   # rad from North, NED
+            if msg.z_valid:
+                self._current_alt = -float(msg.z)
+                self._alt_valid = True
+            if msg.heading_valid:
+                self._heading = float(msg.heading)
+                self._heading_valid = True
 
     def _on_vehicle_status(self, msg: VehicleStatus):
         with self._lock:
             self._in_offboard = (msg.nav_state == self.NAV_STATE_OFFBOARD)
             self._armed       = (msg.arming_state == self.ARMING_STATE_ARMED)
 
-    # ── Control loop ──────────────────────────────────────────────────────────
+    # ── Control loop ──────────────────────────────────────────────────────
     def _control_loop(self):
         """
-        Runs at setpoint_rate_hz (default 20 Hz).
-        OffboardControlMode MUST be published at >2 Hz or PX4 exits OFFBOARD.
+        Runs at setpoint_rate_hz. OffboardControlMode MUST be published at >2 Hz.
         """
         if self._landing:
-            self._publish_ocm()     # keep publishing so PX4 doesn't complain
+            # Keep publishing OCM during landing
+            self._publish_ocm()
             return
 
         now = time.time()
@@ -222,78 +195,108 @@ class PX4ICMOffboardNode(Node):
             current_alt = self._current_alt
             heading     = self._heading
             in_offboard = self._in_offboard
+            armed       = self._armed
+            alt_valid   = self._alt_valid
+            heading_valid = self._heading_valid
 
-        # ── Safety: cmd stream timeout ─────────────────────────────────────────
+        # ── Safety: Don't send commands if not armed ──────────────────────
+        if not armed:
+            return
+
+        # ── Safety: Don't send commands if not in OFFBOARD ────────────────
+        if not in_offboard:
+            self._publish_ocm()  # Keep OCM publishing for OFFBOARD transition
+            return
+
+        # ── Safety: cmd stream timeout ────────────────────────────────────
         if ever_recv:
             elapsed = now - last_cmd
             if elapsed > self._land_to:
                 self.get_logger().error(
-                    f"/uav/action_cmd lost for {elapsed:.1f}s — sending LAND.")
+                    f"CMD lost for {elapsed:.1f}s — LANDING")
                 self._trigger_land()
                 return
             elif elapsed > self._cmd_to:
-                vx_n  = 0.0     # hover: kill horizontal motion, hold altitude
+                self.get_logger().warn(f"CMD timeout {elapsed:.1f}s — hovering")
+                vx_n = 0.0
                 yaw_n = 0.0
 
-        # ── Safety: altitude bounds ────────────────────────────────────────────
-        min_alt = max(0.3, self._tgt_alt - 0.8)
-        max_alt = self._tgt_alt + 1.5
-        if ever_recv and in_offboard and (
-                current_alt < min_alt or current_alt > max_alt):
-            self.get_logger().error(
-                f"Altitude {current_alt:.2f}m outside safe range "
-                f"[{min_alt:.1f}, {max_alt:.1f}]m — sending LAND.")
-            self._trigger_land()
-            return
+        # ── Safety: altitude bounds ──────────────────────────────────────
+        if alt_valid:
+            min_alt = 0.3
+            max_alt = self._tgt_alt + 2.0
+            if current_alt < min_alt or current_alt > max_alt:
+                self.get_logger().error(
+                    f"Altitude {current_alt:.2f}m outside safe range "
+                    f"[{min_alt:.1f}, {max_alt:.1f}]m — LANDING")
+                self._trigger_land()
+                return
 
-        # ── Action shaping (mirrors tello _control_loop) ───────────────────────
-        # Amplify forward, dampen yaw
-        vx_n  = float(np.clip(vx_n  * self._fwd_scale, -1.0, 1.0))
+        # ── Action shaping ──────────────────────────────────────────────────
+        # Apply scaling
+        vx_n = float(np.clip(vx_n * self._fwd_scale, -1.0, 1.0))
         yaw_n = float(np.clip(yaw_n * self._yaw_scale, -1.0, 1.0))
 
-        # Yaw dead zone — small ICM yaw outputs mean "roughly straight"
+        # Yaw dead zone
         if abs(yaw_n) < self._yaw_dz:
             yaw_n = 0.0
 
-        # Suppress yaw when strongly moving forward
-        if vx_n > 0.7:
-            yaw_n = 0.0
-
-        # Minimum forward nudge when not yawing hard
-        if abs(yaw_n) < 0.5 and vx_n < self._min_fwd:
+        # Minimum forward nudge when not yawing
+        if abs(yaw_n) < 0.3 and vx_n < self._min_fwd and vx_n > 0:
             vx_n = self._min_fwd
 
-        # ── Scale to physical units ────────────────────────────────────────────
-        vx_body  = vx_n  * self._max_fwd   # m/s in body frame
-        yaw_rate = yaw_n * self._max_yaw   # rad/s (positive = clockwise in NED)
+        # ── Convert to physical units ──────────────────────────────────────
+        # Forward velocity in body frame (m/s)
+        vx_body = vx_n * self._max_fwd
+        
+        # Yaw rate (rad/s) - positive = clockwise in NED
+        yaw_rate = yaw_n * self._max_yaw
 
-        # Rotate body forward velocity → NED world frame using current heading.
-        # heading = 0 → North.  body +X → vN = vx·cos(hdg), vE = vx·sin(hdg)
-        vn = vx_body * math.cos(heading)
-        ve = vx_body * math.sin(heading)
+        # ── Rotate to NED world frame ──────────────────────────────────────
+        # IMPORTANT: PX4 NED frame:
+        #   - North = +X, East = +Y, Down = +Z
+        #   - Heading = 0 = North, increases clockwise (East = +90°)
+        #   - Body frame: +X = forward, +Y = right
+        #
+        # For optical flow localization:
+        #   - The heading from optical flow is in NED frame
+        #   - Need to rotate body velocity to NED using heading
+        if self._use_heading and heading_valid:
+            # Rotate body forward velocity to NED frame
+            # v_N = v_forward * cos(heading)
+            # v_E = v_forward * sin(heading)
+            vn = vx_body * math.cos(heading)
+            ve = vx_body * math.sin(heading)
+        else:
+            # Use body-frame velocities directly (vehicle_local_position provides this)
+            # In this case, we send velocity in body frame, not world frame
+            # PX4 will handle the rotation if we set the appropriate flags
+            vn = vx_body
+            ve = 0.0
 
-        # Altitude P controller.
-        # error positive (below target) → need to climb → NED vz negative (up)
-        alt_error = self._tgt_alt - current_alt
-        vz_ned    = float(-np.clip(
-            self._alt_kp * alt_error, -self._max_vz, self._max_vz))
+        # ── Altitude control ──────────────────────────────────────────────
+        # PX4 NED: positive z = down, so climb = negative vz
+        if alt_valid:
+            alt_error = self._tgt_alt - current_alt
+            vz_ned = -np.clip(self._alt_kp * alt_error, -self._max_vz, self._max_vz)
+        else:
+            vz_ned = 0.0
 
-        # ── Publish setpoints ──────────────────────────────────────────────────
+        # ── Publish setpoints ──────────────────────────────────────────────
         self._publish_ocm()
-        self._publish_setpoint(vn, ve, vz_ned, yaw_rate)
+        
+        # If we have heading, use yawspeed
+        if self._use_heading and heading_valid:
+            self._publish_setpoint_velocity(vn, ve, vz_ned, yaw_rate)
+        else:
+            # Without heading, send body velocity (PX4 will handle rotation)
+            self._publish_setpoint_body(vx_body, 0.0, vz_ned, yaw_rate)
 
-    # ── PX4 message builders ───────────────────────────────────────────────────
+    # ── PX4 message builders ────────────────────────────────────────────────
     def _ts(self) -> int:
-        """PX4 expects timestamps in microseconds."""
         return int(time.time() * 1e6)
 
     def _publish_ocm(self):
-        """
-        OffboardControlMode — tells PX4 which setpoint fields are valid.
-        velocity=True only: PX4 reads velocity[0..2] and yawspeed from
-        TrajectorySetpoint. Position controller is bypassed for XY;
-        altitude is handled by our own vz P-controller above.
-        """
         msg = OffboardControlMode()
         msg.timestamp    = self._ts()
         msg.position     = False
@@ -303,12 +306,11 @@ class PX4ICMOffboardNode(Node):
         msg.body_rate    = False
         self._pub_ocm.publish(msg)
 
-    def _publish_setpoint(self, vn: float, ve: float,
-                          vz_ned: float, yaw_rate: float):
+    def _publish_setpoint_velocity(self, vn: float, ve: float, 
+                                   vz_ned: float, yaw_rate: float):
         """
-        TrajectorySetpoint in NED frame (m/s).
-        position = [nan, nan, nan]  → ignored (velocity-only mode)
-        yaw      = nan              → use yawspeed instead
+        Publish velocity setpoint in NED world frame.
+        Used when heading is available from VIO/optical flow.
         """
         nan = float("nan")
         msg = TrajectorySetpoint()
@@ -320,13 +322,34 @@ class PX4ICMOffboardNode(Node):
         msg.yawspeed     = float(yaw_rate)
         self._pub_sp.publish(msg)
 
-    def _trigger_land(self):
-        """Send MAV_CMD_NAV_LAND and latch — no more velocity setpoints."""
-        self._landing = True
+    def _publish_setpoint_body(self, vx_body: float, vy_body: float,
+                               vz_ned: float, yaw_rate: float):
+        """
+        Publish velocity setpoint in body frame.
+        Used when heading is NOT available (optical flow only).
+        PX4 will handle the rotation.
+        """
+        nan = float("nan")
+        msg = TrajectorySetpoint()
+        msg.timestamp    = self._ts()
+        msg.position     = [nan, nan, nan]
+        msg.velocity     = [float(vx_body), float(vy_body), float(vz_ned)]
+        msg.acceleration = [nan, nan, nan]
+        msg.yaw          = nan
+        msg.yawspeed     = float(yaw_rate)
+        self._pub_sp.publish(msg)
 
-        # One final zero setpoint before handing off to PX4 land controller
+    def _trigger_land(self):
+        """Send LAND command and latch."""
+        if self._landing:
+            return
+            
+        self._landing = True
+        self._landing_start_time = time.time()
+
+        # Send zero setpoint
         self._publish_ocm()
-        self._publish_setpoint(0.0, 0.0, 0.0, 0.0)
+        self._publish_setpoint_velocity(0.0, 0.0, 0.0, 0.0)
 
         cmd = VehicleCommand()
         cmd.timestamp        = self._ts()
@@ -336,25 +359,24 @@ class PX4ICMOffboardNode(Node):
         cmd.source_system    = 1
         cmd.source_component = 1
         cmd.from_external    = True
-        cmd.param1           = 0.0   # abort altitude (0 = firmware default)
-        cmd.param7           = 0.0   # landing target altitude
+        cmd.param1           = 0.0
+        cmd.param7           = 0.0
         self._pub_vc.publish(cmd)
 
-        self.get_logger().warn(
-            "LAND command sent. Velocity setpoints zeroed. "
-            "OCM will keep publishing until node is shut down.")
+        self.get_logger().warn("LAND command sent.")
 
-    # ── Diagnostics ────────────────────────────────────────────────────────────
+    # ── Diagnostics ──────────────────────────────────────────────────────────
     def _log_status(self):
         with self._lock:
             vx_n   = self._vx_norm
             yaw_n  = self._yaw_norm
             alt    = self._current_alt
-            hdg    = math.degrees(self._heading)
+            hdg    = math.degrees(self._heading) if self._heading_valid else 0.0
             armed  = self._armed
             offbd  = self._in_offboard
             ever   = self._cmd_ever_recv
             age    = time.time() - self._last_cmd_time if ever else -1.0
+            alt_valid = self._alt_valid
 
         if self._landing:
             state = "LANDING"
@@ -363,26 +385,27 @@ class PX4ICMOffboardNode(Node):
         elif not offbd:
             state = "WAITING FOR OFFBOARD"
         else:
-            state = "OFFBOARD — FLYING"
+            state = "OFFBOARD"
 
         self.get_logger().info(
             f"[{state}]  "
             f"alt={alt:.2f}m (tgt={self._tgt_alt}m)  "
             f"hdg={hdg:.1f}°  "
             f"vx_n={vx_n:+.2f}  yaw_n={yaw_n:+.2f}  "
-            f"cmd_age={age:.2f}s"
+            f"cmd_age={age:.2f}s  "
+            f"alt_valid={alt_valid}"
         )
 
-    # ── Cleanup 
+    # ── Cleanup ──────────────────────────────────────────────────────────────
     def shutdown(self):
         self.get_logger().info("Shutting down — zeroing setpoints.")
         try:
-            self._publish_setpoint(0.0, 0.0, 0.0, 0.0)
+            self._publish_setpoint_velocity(0.0, 0.0, 0.0, 0.0)
         except Exception as e:
             self.get_logger().warn(f"Shutdown error: {e}")
 
 
-# ENTRY POINT
+# ── ENTRY POINT ──────────────────────────────────────────────────────────────
 def main(args=None):
     rclpy.init(args=args)
     node = PX4ICMOffboardNode()

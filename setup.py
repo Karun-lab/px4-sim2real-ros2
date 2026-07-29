@@ -36,6 +36,12 @@ setup(
             "tello_icm_bridge_node=sim2real.tello_icm_bridge_node:main",
             "px4_icm_node=sim2real.px4_icm_node:main",
             "tello_icm_node=sim2real.tello_icm_node:main",
+            "tello_icm_lstm_node=sim2real.tello_icm_lstm_node:main",
+            "icm_lstm_inference_node=sim2real.icm_lstm_inference_node:main",
+            "tello_supervisor_node=sim2real.tello_supervisor_node:main",
+            "tello_trajectory_visualizer=sim2real.tello_trajectory_visualizer:main",
+            "tello_traj_viz_node=sim2real.tello_traj_viz_node:main",
+            "iris_icm_map_inference_node=sim2real.iris_icm_map_inference_node:main",
         ],
     },
 )
