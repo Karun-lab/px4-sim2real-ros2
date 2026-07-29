@@ -42,6 +42,7 @@ setup(
             "tello_trajectory_visualizer=sim2real.tello_trajectory_visualizer:main",
             "tello_traj_viz_node=sim2real.tello_traj_viz_node:main",
             "iris_icm_map_inference_node=sim2real.iris_icm_map_inference_node:main",
+            "icm_command_monitor=sim2real.icm_command_monitor:main",
         ],
     },
 )
