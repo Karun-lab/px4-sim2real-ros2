@@ -249,7 +249,7 @@ class PX4ICMOffboardNode(Node):
 
         # ── Action shaping ──────────────────────────────────────────────────
         # Apply scaling
-        vx_n = float(np.clip(vx_n * self._fwd_scale, -1.0, 1.0))
+        vx_n = float(np.clip(vx_n * self._fwd_scale, -0.2, 1.0))
         yaw_n = float(np.clip(yaw_n * self._yaw_scale, -1.0, 1.0))
 
         # Yaw dead zone
