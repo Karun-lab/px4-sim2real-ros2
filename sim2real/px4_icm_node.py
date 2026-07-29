@@ -3,7 +3,7 @@
 px4_icm_offboard_node.py
 =========================
 ROS 2 offboard control node for a PX4 drone driven by ICM exploration.
-Fixed heading interpretation and velocity scaling for optical flow localization.
+Fixed for compatibility with different px4_msgs versions.
 
 Subscribes:
     /uav/action_cmd  (geometry_msgs/Twist) — normalised ICM commands
@@ -82,7 +82,7 @@ class PX4ICMOffboardNode(Node):
         self.declare_parameter("fwd_scale",          1.0)
         self.declare_parameter("min_fwd_norm",       0.1)
         self.declare_parameter("setpoint_rate_hz",   20.0)
-        self.declare_parameter("use_heading",        True)  # Use heading from VIO/optical flow
+        self.declare_parameter("use_heading",        True)
 
         self._max_fwd   = float(self.get_parameter("max_forward_m_s").value)
         self._max_yaw   = float(self.get_parameter("max_yaw_rate_rad_s").value)
@@ -101,7 +101,7 @@ class PX4ICMOffboardNode(Node):
         # ── State ──────────────────────────────────────────────────────────
         self._lock          = threading.Lock()
         self._vx_norm       = 0.0
-        self._vy_norm       = 0.0  # Not used by ICM, but keep for completeness
+        self._vy_norm       = 0.0
         self._yaw_norm      = 0.0
         self._last_cmd_time = 0.0
         self._cmd_ever_recv = False
@@ -130,11 +130,14 @@ class PX4ICMOffboardNode(Node):
         self.create_subscription(
             Twist, "/uav/action_cmd",
             self._on_action, 10)
+            
+        # Subscribe to vehicle_local_position (try both topic names)
         self.create_subscription(
-            VehicleLocalPosition, "/fmu/out/vehicle_local_position",
+            VehicleLocalPosition, "/fmu/out/vehicle_local_position_v1",
             self._on_local_pos, PX4_QOS)
+            
         self.create_subscription(
-            VehicleStatus, "/fmu/out/vehicle_status",
+            VehicleStatus, "/fmu/out/vehicle_status_v1",
             self._on_vehicle_status, PX4_QOS)
 
         # ── Timers ──────────────────────────────────────────────────────────
@@ -162,11 +165,24 @@ class PX4ICMOffboardNode(Node):
     # ── PX4 telemetry ──────────────────────────────────────────────────────
     def _on_local_pos(self, msg: VehicleLocalPosition):
         with self._lock:
-            # PX4 z is NED (negative = up). Convert to positive-up metres.
-            if msg.z_valid:
+            # Check if z is valid (different field names in different versions)
+            if hasattr(msg, 'z_valid') and msg.z_valid:
                 self._current_alt = -float(msg.z)
                 self._alt_valid = True
-            if msg.heading_valid:
+            elif hasattr(msg, 'z_deriv'):  # Fallback: if z_valid doesn't exist
+                self._current_alt = -float(msg.z)
+                self._alt_valid = True
+            
+            # Check heading validity (different field names)
+            if hasattr(msg, 'heading_valid') and msg.heading_valid:
+                self._heading = float(msg.heading)
+                self._heading_valid = True
+            elif hasattr(msg, 'heading_var') and msg.heading_var < 0.1:
+                # If heading_var exists and is small, heading is valid
+                self._heading = float(msg.heading)
+                self._heading_valid = True
+            elif hasattr(msg, 'heading'):
+                # Assume heading is valid if it exists (fallback)
                 self._heading = float(msg.heading)
                 self._heading_valid = True
 
@@ -181,7 +197,6 @@ class PX4ICMOffboardNode(Node):
         Runs at setpoint_rate_hz. OffboardControlMode MUST be published at >2 Hz.
         """
         if self._landing:
-            # Keep publishing OCM during landing
             self._publish_ocm()
             return
 
@@ -205,7 +220,7 @@ class PX4ICMOffboardNode(Node):
 
         # ── Safety: Don't send commands if not in OFFBOARD ────────────────
         if not in_offboard:
-            self._publish_ocm()  # Keep OCM publishing for OFFBOARD transition
+            self._publish_ocm()
             return
 
         # ── Safety: cmd stream timeout ────────────────────────────────────
@@ -246,36 +261,20 @@ class PX4ICMOffboardNode(Node):
             vx_n = self._min_fwd
 
         # ── Convert to physical units ──────────────────────────────────────
-        # Forward velocity in body frame (m/s)
         vx_body = vx_n * self._max_fwd
-        
-        # Yaw rate (rad/s) - positive = clockwise in NED
         yaw_rate = yaw_n * self._max_yaw
 
         # ── Rotate to NED world frame ──────────────────────────────────────
-        # IMPORTANT: PX4 NED frame:
-        #   - North = +X, East = +Y, Down = +Z
-        #   - Heading = 0 = North, increases clockwise (East = +90°)
-        #   - Body frame: +X = forward, +Y = right
-        #
-        # For optical flow localization:
-        #   - The heading from optical flow is in NED frame
-        #   - Need to rotate body velocity to NED using heading
         if self._use_heading and heading_valid:
             # Rotate body forward velocity to NED frame
-            # v_N = v_forward * cos(heading)
-            # v_E = v_forward * sin(heading)
             vn = vx_body * math.cos(heading)
             ve = vx_body * math.sin(heading)
         else:
-            # Use body-frame velocities directly (vehicle_local_position provides this)
-            # In this case, we send velocity in body frame, not world frame
-            # PX4 will handle the rotation if we set the appropriate flags
+            # Use body-frame velocities directly
             vn = vx_body
             ve = 0.0
 
         # ── Altitude control ──────────────────────────────────────────────
-        # PX4 NED: positive z = down, so climb = negative vz
         if alt_valid:
             alt_error = self._tgt_alt - current_alt
             vz_ned = -np.clip(self._alt_kp * alt_error, -self._max_vz, self._max_vz)
@@ -285,11 +284,10 @@ class PX4ICMOffboardNode(Node):
         # ── Publish setpoints ──────────────────────────────────────────────
         self._publish_ocm()
         
-        # If we have heading, use yawspeed
+        # Use appropriate setpoint method
         if self._use_heading and heading_valid:
             self._publish_setpoint_velocity(vn, ve, vz_ned, yaw_rate)
         else:
-            # Without heading, send body velocity (PX4 will handle rotation)
             self._publish_setpoint_body(vx_body, 0.0, vz_ned, yaw_rate)
 
     # ── PX4 message builders ────────────────────────────────────────────────
@@ -308,10 +306,7 @@ class PX4ICMOffboardNode(Node):
 
     def _publish_setpoint_velocity(self, vn: float, ve: float, 
                                    vz_ned: float, yaw_rate: float):
-        """
-        Publish velocity setpoint in NED world frame.
-        Used when heading is available from VIO/optical flow.
-        """
+        """Publish velocity setpoint in NED world frame."""
         nan = float("nan")
         msg = TrajectorySetpoint()
         msg.timestamp    = self._ts()
@@ -324,11 +319,7 @@ class PX4ICMOffboardNode(Node):
 
     def _publish_setpoint_body(self, vx_body: float, vy_body: float,
                                vz_ned: float, yaw_rate: float):
-        """
-        Publish velocity setpoint in body frame.
-        Used when heading is NOT available (optical flow only).
-        PX4 will handle the rotation.
-        """
+        """Publish velocity setpoint in body frame."""
         nan = float("nan")
         msg = TrajectorySetpoint()
         msg.timestamp    = self._ts()
@@ -377,6 +368,7 @@ class PX4ICMOffboardNode(Node):
             ever   = self._cmd_ever_recv
             age    = time.time() - self._last_cmd_time if ever else -1.0
             alt_valid = self._alt_valid
+            hdg_valid = self._heading_valid
 
         if self._landing:
             state = "LANDING"
@@ -393,7 +385,7 @@ class PX4ICMOffboardNode(Node):
             f"hdg={hdg:.1f}°  "
             f"vx_n={vx_n:+.2f}  yaw_n={yaw_n:+.2f}  "
             f"cmd_age={age:.2f}s  "
-            f"alt_valid={alt_valid}"
+            f"alt_valid={alt_valid} hdg_valid={hdg_valid}"
         )
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
