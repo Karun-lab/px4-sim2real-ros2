@@ -28,7 +28,7 @@ class TelloDataNode(Node):
         self.frame_reader = self.drone.get_frame_read()
 
         # ---------------- ROS PUBLISHERS ----------------
-        self.image_pub = self.create_publisher(Image, '/tello/image', 10)
+        self.image_pub = self.create_publisher(Image, '/tello_stream', 10)
         self.status_pub = self.create_publisher(Float32MultiArray, '/tello/status', 10)
         self.imu_pub = self.create_publisher(Vector3, '/tello/imu_like', 10)
 
