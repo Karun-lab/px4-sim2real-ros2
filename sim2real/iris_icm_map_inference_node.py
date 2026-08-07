@@ -229,6 +229,8 @@ class IrisICMMapInferenceNode(Node):
         self.declare_parameter("inference_rate_hz", 20.0)
         self.declare_parameter("device", "cuda" if torch.cuda.is_available() else "cpu")
         self.declare_parameter("reset_on_timeout", True)
+
+        
         self.declare_parameter("grid_reset_timeout_s", 5.0)
 
         ckpt_path = self.get_parameter("checkpoint_path").value
