@@ -222,7 +222,7 @@ class IrisICMMapInferenceNode(Node):
         super().__init__("iris_icm_map_inference_node")
 
         # ---- parameters ----
-        self.declare_parameter("checkpoint_path", "/home/user/ros2_jazzy/src/sim2real/trained_models/icm_map_best.pt")
+        self.declare_parameter("checkpoint_path", "/home/user/m2h_ws/src/px4-sim2real-ros2/trained_models/icm_map_best.pt")
         self.declare_parameter("depth_topic", "/m2h/depth/image")
         self.declare_parameter("vio_topic", "/rvio2/trajectory")
         self.declare_parameter("action_topic", "/uav/action_cmd")
