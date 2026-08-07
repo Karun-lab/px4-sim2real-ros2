@@ -16,8 +16,8 @@ Publishes (to PX4 via uXRCE-DDS):
 
 Parameters (all tunable via --ros-args -p)
 ------------------------------------------
-    max_forward_m_s     float  default 0.5    max forward speed (m/s)
-    max_yaw_rate_rad_s  float  default 0.5    max yaw rate (rad/s)
+    max_forward_m_s     float  default 1.5    max forward speed (m/s)
+    max_yaw_rate_rad_s  float  default 1.0    max yaw rate (rad/s)
     cmd_timeout_s       float  default 0.5    hover after no command (s)
     setpoint_rate_hz    float  default 20.0   control loop rate (Hz)
 
@@ -68,7 +68,7 @@ class PX4ICMGuidanceNode(Node):
 
         # ── Parameters ──────────────────────────────────────────────────────────
         self.declare_parameter("max_forward_m_s",    1.5)
-        self.declare_parameter("max_yaw_rate_rad_s", 0.5)
+        self.declare_parameter("max_yaw_rate_rad_s", 1.0)
         self.declare_parameter("cmd_timeout_s",      0.5)
         self.declare_parameter("setpoint_rate_hz",   20.0)
         self.declare_parameter("use_body_frame",     True)  # True = body frame velocities
