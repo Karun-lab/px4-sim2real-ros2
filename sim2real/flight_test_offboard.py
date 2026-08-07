@@ -9,13 +9,21 @@ trajectory setpoint plumbing is correct in isolation.
 
 Sequence
 --------
-    Phase 0  ARM_STREAM   : publish zero setpoints for ~2s before requesting
-                             offboard mode (PX4 requires a setpoint stream
+    Phase 0  INIT_HOVER   : publish zero setpoints for ~10s. No arming or
+                             mode switch required yet — this is purely a
+                             safe idle window so you have time to power up,
+                             check the drone, and prepare to arm. The node
+                             is already streaming valid zero-velocity
+                             setpoints throughout this phase.
+    Phase 1  ARM_STREAM   : publish zero setpoints for ~2s more — this is
+                             the window in which you should arm and switch
+                             to OFFBOARD (PX4 requires a setpoint stream
                              for at least 10 setpoints / ~1s before it will
-                             accept the OFFBOARD mode switch)
-    Phase 1  FORWARD      : vx = +forward_speed   for forward_duration_s
-    Phase 2  RIGHT        : vy = +right_speed     for right_duration_s
-    Phase 3  HOVER        : vx = vy = 0, yaw_rate = 0, then node exits
+                             accept the OFFBOARD mode switch, so arm anytime
+                             during INIT_HOVER or ARM_STREAM)
+    Phase 2  FORWARD      : vx = +forward_speed   for forward_duration_s
+    Phase 3  RIGHT        : vy = +right_speed     for right_duration_s
+    Phase 4  HOVER        : vx = vy = 0, yaw_rate = 0, then node exits
                              (does NOT auto-land — land manually or via RC)
 
 Body-frame convention (PX4 FRD — Forward, Right, Down)
