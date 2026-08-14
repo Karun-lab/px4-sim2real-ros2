@@ -62,7 +62,7 @@ class PX4ICMGuidanceNode(Node):
 
         # ── Parameters ──────────────────────────────────────────────────────────
         self.declare_parameter("max_forward_m_s",    0.5)
-        self.declare_parameter("max_yaw_rate_rad_s", 1.0)
+        self.declare_parameter("max_yaw_rate_rad_s", 1.5)
         self.declare_parameter("cmd_timeout_s",      0.5)
         self.declare_parameter("setpoint_rate_hz",   20.0)
 
@@ -148,14 +148,14 @@ class PX4ICMGuidanceNode(Node):
         # ── Action shaping ──────────────────────────────────────────────────────
         # Amplify forward slightly, dampen yaw
         vx_n = float(np.clip(vx_n * 1.4, -0.2, 1.0))
-        yaw_n = float(np.clip(yaw_n * 0.7, -1.0, 1.0))
+        yaw_n = float(np.clip(yaw_n * 0.8, -1.0, 1.0))
 
         # Suppress yaw when moving forward fast
         if vx_n > 0.7:
             yaw_n = 0.0
 
         # Yaw deadzone
-        if abs(yaw_n) < 0.4:
+        if abs(yaw_n) < 0.6:
             yaw_n = 0.0
 
         # Minimum forward nudge when not yawing
