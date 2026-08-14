@@ -147,7 +147,7 @@ class PX4ICMGuidanceNode(Node):
 
         # ── Action shaping ──────────────────────────────────────────────────────
         # Amplify forward slightly, dampen yaw
-        vx_n = float(np.clip(vx_n * 1.4, -0.2, 1.0))
+        vx_n = float(np.clip(vx_n * 1.4, -0.4, 1.0))
         yaw_n = float(np.clip(yaw_n * 0.8, -1.0, 1.0))
 
         # Suppress yaw when moving forward fast
