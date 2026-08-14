@@ -62,7 +62,7 @@ class PX4ICMGuidanceNode(Node):
 
         # ── Parameters ──────────────────────────────────────────────────────────
         self.declare_parameter("max_forward_m_s",    0.5)
-        self.declare_parameter("max_yaw_rate_rad_s", 1.5)
+        self.declare_parameter("max_yaw_rate_rad_s", 1.0)
         self.declare_parameter("cmd_timeout_s",      0.5)
         self.declare_parameter("setpoint_rate_hz",   20.0)
 
