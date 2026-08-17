@@ -10,7 +10,7 @@ environment's visit-count grid.
 
 Subscribes:
     depth topic     (sensor_msgs/Image)           - /m2h/depth/image
-    vio pose topic  (geometry_msgs/PoseStamped)   - /rvio2/trajectory
+    vio pose topic  (geometry_msgs/PoseStamped)   - /mono_hydra_vio/path
 
 Publishes:
     action topic    (geometry_msgs/Twist)         - /uav/action_cmd
@@ -170,12 +170,30 @@ class NoveltyMapBuilder:
         
         # Previous pose for drift tracking
         self._last_pos = None
+        self._origin_set = False
+        self._origin_x = 0.0
+        self._origin_y = 0.0
         
+    def set_origin(self, x: float, y: float):
+        """Set the origin of the grid (first pose received)."""
+        if not self._origin_set:
+            self._origin_x = x
+            self._origin_y = y
+            self._origin_set = True
+            print(f"[NoveltyMapBuilder] Origin set to ({x:.2f}, {y:.2f})")
+    
     def pos_to_cell(self, x: float, y: float) -> tuple:
         """Convert local XY metres to grid indices (row, col)."""
+        if not self._origin_set:
+            return 0, 0
+            
+        # Convert to local coordinates (relative to origin)
+        lx = x - self._origin_x
+        ly = y - self._origin_y
+        
         half = self.grid_n // 2
-        col = int(x / self.cell_m + half)
-        row = int(-y / self.cell_m + half)
+        col = int(lx / self.cell_m + half)
+        row = int(-ly / self.cell_m + half)
         col = max(0, min(col, self.grid_n - 1))
         row = max(0, min(row, self.grid_n - 1))
         return row, col
@@ -185,6 +203,9 @@ class NoveltyMapBuilder:
         Update visit count at current position and return local novelty map.
         Returns (LOCAL_MAP_PX, LOCAL_MAP_PX) novelty map in [0,1].
         """
+        # Set origin on first update
+        self.set_origin(x, y)
+        
         row, col = self.pos_to_cell(x, y)
         
         # Increment visit count
@@ -211,6 +232,9 @@ class NoveltyMapBuilder:
         """Reset the grid for a new episode."""
         self.visit_count.fill(0.0)
         self._last_pos = None
+        self._origin_set = False
+        self._origin_x = 0.0
+        self._origin_y = 0.0
 
 
 # =============================================================================
@@ -224,13 +248,11 @@ class IrisICMMapInferenceNode(Node):
         # ---- parameters ----
         self.declare_parameter("checkpoint_path", "/root/m2h_ws/src/px4-sim2real-ros2/trained_models/icm_map_best.pt")
         self.declare_parameter("depth_topic", "/m2h/depth/image")
-        self.declare_parameter("vio_topic", "/rvio2/trajectory")
+        self.declare_parameter("vio_topic", "/mono_hydra_vio/path")  # Changed to /mono_hydra_vio/path
         self.declare_parameter("action_topic", "/uav/action_cmd")
         self.declare_parameter("inference_rate_hz", 20.0)
         self.declare_parameter("device", "cuda" if torch.cuda.is_available() else "cpu")
         self.declare_parameter("reset_on_timeout", True)
-
-        
         self.declare_parameter("grid_reset_timeout_s", 5.0)
 
         ckpt_path = self.get_parameter("checkpoint_path").value
@@ -321,7 +343,7 @@ class IrisICMMapInferenceNode(Node):
 
     # ------------------------------------------------------------------
     def _on_vio(self, msg: PoseStamped):
-        """Receive VIO pose (world frame)."""
+        """Receive VIO pose from /mono_hydra_vio/path."""
         self._pos_x = msg.pose.position.x
         self._pos_y = msg.pose.position.y
         self._pos_z = msg.pose.position.z
@@ -329,7 +351,6 @@ class IrisICMMapInferenceNode(Node):
         self._have_pose = True
 
         # Reset grid if drone has moved significantly (new episode)
-        # This happens when the drone is picked up and placed at a new location
         if hasattr(self, '_last_reset_pos'):
             dx = self._pos_x - self._last_reset_pos[0]
             dy = self._pos_y - self._last_reset_pos[1]
