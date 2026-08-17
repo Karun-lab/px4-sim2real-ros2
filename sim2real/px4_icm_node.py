@@ -181,6 +181,17 @@ class PX4ICMGuidanceNode(Node):
         # ── Publish setpoints ──────────────────────────────────────────────────
         self._publish_ocm()
         self._publish_setpoint_ned(vn, ve, 0.0, yaw_rate)
+        # ── Debug logging (every 50 loops) ─────────────────────────────────────
+        if not hasattr(self, '_debug_counter'):
+            self._debug_counter = 0
+        self._debug_counter += 1
+        
+        if self._debug_counter % 50 == 0:
+            self.get_logger().info(
+                f"[DEBUG]  vx_n={vx_n:+.2f}  yaw_n={yaw_n:+.2f}  "
+                f"→  vx_body={vx_body:+.3f} m/s  yaw_rate={yaw_rate:+.3f} rad/s  "
+                f"heading={math.degrees(heading):.1f}°"
+            )
 
     # ── PX4 message builders ──────────────────────────────────────────────────
     def _ts(self) -> int:
@@ -233,12 +244,12 @@ class PX4ICMGuidanceNode(Node):
             heading_deg = math.degrees(self._heading) if self._heading_valid else 0.0
             age = time.time() - self._last_cmd_time
 
-        self.get_logger().info(
-            f"[GUIDANCE]  "
-            f"vx_n={vx_n:+.2f}  yaw_n={yaw_n:+.2f}  "
-            f"heading={heading_deg:.1f}°  "
-            f"cmd_age={age:.2f}s"
-        )
+        # self.get_logger().info(
+        #     f"[GUIDANCE]  "
+        #     f"vx_n={vx_n:+.2f}  yaw_n={yaw_n:+.2f}  "
+        #     f"heading={heading_deg:.1f}°  "
+        #     f"cmd_age={age:.2f}s"
+        # )
 
     # ── Cleanup ────────────────────────────────────────────────────────────────
     def shutdown(self):
