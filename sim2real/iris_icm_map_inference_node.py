@@ -16,13 +16,6 @@ Publishes:
     action topic    (geometry_msgs/Twist)         - /uav/action_cmd
         linear.x  = forward velocity command (normalised [-1, 1])
         angular.z = yaw rate command (normalised [-1, 1])
-
-Pipeline (mirrors iris_icm_map_env.py):
-    1. depth -> clamp -> normalise to [0,1]           (channel 0)
-    2. VIO pose -> update visit-count grid -> extract local novelty map (channel 1)
-    3. stack last T=3 (depth, novelty) frames         -> (T,H,W,2)
-    4. run PPO policy, apply EMA smoothing (alpha=0.6)
-    5. publish normalised (vx, yaw)
 """
 
 from collections import deque
@@ -47,35 +40,26 @@ except ImportError as e:
 
 
 # =============================================================================
-# CONSTANTS — MUST match training (iris_icm_map_env.py / iris_icm_map_agent.py)
+# CONSTANTS
 # =============================================================================
 
-# Depth
 CAM_H, CAM_W = 64, 80
 CAM_MIN_DEPTH, CAM_MAX_DEPTH = 0.2, 6.0
-
-# History
 HIST_LEN = 3
-N_CH = 2   # depth + novelty map (2-channel observation)
-
-# Grid / novelty map (must match training)
-GRID_CELL_M = 0.25      # metres per cell
-GRID_EXTENT_M = 30.0    # grid covers ±15 m from origin
-GRID_N = int(GRID_EXTENT_M / GRID_CELL_M)  # 120 cells per side
-LOCAL_MAP_PX = 21       # 21×21 cells novelty crop
+N_CH = 2
+GRID_CELL_M = 0.25
+GRID_EXTENT_M = 30.0
+GRID_N = int(GRID_EXTENT_M / GRID_CELL_M)
+LOCAL_MAP_PX = 21
 HALF_CROP = LOCAL_MAP_PX // 2
-
-# Action smoothing (matches training)
 ACTION_ALPHA = 0.6
 
 
 # =============================================================================
-# MODEL — same architecture as IrisICMOfficeModel (iris_icm_map_agent.py)
+# MODEL
 # =============================================================================
 
 class IrisICMMapPolicyNet(nn.Module):
-    """2-channel CNN policy: depth + novelty map."""
-    
     def __init__(self, t_steps=HIST_LEN, h=CAM_H, w=CAM_W, n_ch=N_CH, action_dim=2):
         super().__init__()
         self.t_steps = t_steps
@@ -101,22 +85,20 @@ class IrisICMMapPolicyNet(nn.Module):
         )
         self.policy_mean = nn.Linear(256, action_dim)
         self.log_std = nn.Parameter(torch.zeros(action_dim))
-        self.value_head = nn.Linear(256, 1)  # unused at inference
+        self.value_head = nn.Linear(256, 1)
 
     @torch.no_grad()
     def act(self, obs: torch.Tensor) -> torch.Tensor:
-        """obs: (1, T, H, W, C) in [0,1] -> returns (1, action_dim) mean action."""
         feats = []
         for t in range(self.t_steps):
-            frame = obs[:, t].permute(0, 3, 1, 2)  # (N, C, H, W)
+            frame = obs[:, t].permute(0, 3, 1, 2)
             feats.append(self.cnn(frame))
         shared = self.net(torch.cat(feats, dim=1))
         mean = self.policy_mean(shared)
         return mean
 
 
-def load_policy(checkpoint_path: str, device: torch.device) -> IrisICMMapPolicyNet:
-    """Load checkpoint with 2-channel observation support."""
+def load_policy(checkpoint_path: str, device: torch.device):
     model = IrisICMMapPolicyNet(n_ch=N_CH).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
@@ -127,24 +109,17 @@ def load_policy(checkpoint_path: str, device: torch.device) -> IrisICMMapPolicyN
     else:
         state_dict = ckpt
 
-    # Clean up keys
     cleaned = {}
     model_keys = set(model.state_dict().keys())
     for k, v in state_dict.items():
         if k in model_keys:
             cleaned[k] = v
         else:
-            # Try to match by suffix
             match = next((mk for mk in model_keys if k.endswith(mk)), None)
             if match:
                 cleaned[match] = v
 
-    missing, unexpected = model.load_state_dict(cleaned, strict=False)
-    if missing:
-        print(f"[load_policy] WARNING missing keys: {missing}")
-    if unexpected:
-        print(f"[load_policy] WARNING unexpected keys: {unexpected}")
-
+    model.load_state_dict(cleaned, strict=False)
     model.eval()
     return model
 
@@ -154,43 +129,28 @@ def load_policy(checkpoint_path: str, device: torch.device) -> IrisICMMapPolicyN
 # =============================================================================
 
 class NoveltyMapBuilder:
-    """
-    Builds and maintains the visit-count grid from VIO pose estimates.
-    Mirrors the training environment's grid logic.
-    """
-    
     def __init__(self, grid_n=GRID_N, cell_m=GRID_CELL_M, half_crop=HALF_CROP):
         self.grid_n = grid_n
         self.cell_m = cell_m
         self.half_crop = half_crop
         self.local_px = 2 * half_crop + 1
-        
-        # Visit count grid (2D array)
         self.visit_count = np.zeros((grid_n, grid_n), dtype=np.float32)
-        
-        # Previous pose for drift tracking
-        self._last_pos = None
         self._origin_set = False
         self._origin_x = 0.0
         self._origin_y = 0.0
         
     def set_origin(self, x: float, y: float):
-        """Set the origin of the grid (first pose received)."""
         if not self._origin_set:
             self._origin_x = x
             self._origin_y = y
             self._origin_set = True
             print(f"[NoveltyMapBuilder] Origin set to ({x:.2f}, {y:.2f})")
     
-    def pos_to_cell(self, x: float, y: float) -> tuple:
-        """Convert local XY metres to grid indices (row, col)."""
+    def pos_to_cell(self, x: float, y: float):
         if not self._origin_set:
             return 0, 0
-            
-        # Convert to local coordinates (relative to origin)
         lx = x - self._origin_x
         ly = y - self._origin_y
-        
         half = self.grid_n // 2
         col = int(lx / self.cell_m + half)
         row = int(-ly / self.cell_m + half)
@@ -198,40 +158,22 @@ class NoveltyMapBuilder:
         row = max(0, min(row, self.grid_n - 1))
         return row, col
     
-    def update(self, x: float, y: float) -> np.ndarray:
-        """
-        Update visit count at current position and return local novelty map.
-        Returns (LOCAL_MAP_PX, LOCAL_MAP_PX) novelty map in [0,1].
-        """
-        # Set origin on first update
+    def update(self, x: float, y: float):
         self.set_origin(x, y)
-        
         row, col = self.pos_to_cell(x, y)
-        
-        # Increment visit count
         self.visit_count[row, col] += 1.0
         
-        # Extract local crop
         half = self.half_crop
         pad = half
-        
-        # Pad the grid with zeros (unvisited = high novelty)
         padded = np.pad(self.visit_count, pad, mode='constant', constant_values=0.0)
-        
-        # Extract crop centred on drone
         pr = row + pad
         pc = col + pad
         crop = padded[pr - half:pr + half + 1, pc - half:pc + half + 1]
-        
-        # Convert visit counts to novelty: 1/(count+1)
-        novelty = 1.0 / (crop + 1.0)  # [0,1], 1=unvisited
-        
+        novelty = 1.0 / (crop + 1.0)
         return novelty
     
     def reset(self):
-        """Reset the grid for a new episode."""
         self.visit_count.fill(0.0)
-        self._last_pos = None
         self._origin_set = False
         self._origin_x = 0.0
         self._origin_y = 0.0
@@ -248,11 +190,11 @@ class IrisICMMapInferenceNode(Node):
         # ---- parameters ----
         self.declare_parameter("checkpoint_path", "/root/m2h_ws/src/px4-sim2real-ros2/trained_models/icm_map_best.pt")
         self.declare_parameter("depth_topic", "/m2h/depth/image")
-        self.declare_parameter("vio_topic", "/mono_hydra_vio/path")  # Changed to /mono_hydra_vio/path
+        self.declare_parameter("vio_topic", "/mono_hydra_vio/path")
         self.declare_parameter("action_topic", "/uav/action_cmd")
         self.declare_parameter("inference_rate_hz", 20.0)
         self.declare_parameter("device", "cuda" if torch.cuda.is_available() else "cpu")
-        self.declare_parameter("reset_on_timeout", True)
+        self.declare_parameter("fallback_pose", True)  # Use fallback if no pose
         self.declare_parameter("grid_reset_timeout_s", 5.0)
 
         ckpt_path = self.get_parameter("checkpoint_path").value
@@ -261,11 +203,11 @@ class IrisICMMapInferenceNode(Node):
         action_topic = self.get_parameter("action_topic").value
         rate_hz = float(self.get_parameter("inference_rate_hz").value)
         device_str = self.get_parameter("device").value
-        self.reset_on_timeout = self.get_parameter("reset_on_timeout").value
+        self.fallback_pose = self.get_parameter("fallback_pose").value
         self.grid_reset_timeout = float(self.get_parameter("grid_reset_timeout_s").value)
 
         self.device = torch.device(device_str)
-        self.get_logger().info(f"Loading policy checkpoint: {ckpt_path} on {self.device}")
+        self.get_logger().info(f"Loading policy checkpoint: {ckpt_path}")
         self.policy = load_policy(ckpt_path, self.device)
         self.get_logger().info("Policy loaded.")
 
@@ -276,11 +218,12 @@ class IrisICMMapInferenceNode(Node):
         self._have_depth = False
         self._have_pose = False
         
-        # VIO pose (local frame)
+        # VIO pose
         self._pos_x = 0.0
         self._pos_y = 0.0
         self._pos_z = 0.0
         self._last_pose_time = self.get_clock().now()
+        self._pose_timeout_warned = False
         
         # Novelty map builder
         self.novelty_builder = NoveltyMapBuilder()
@@ -288,16 +231,13 @@ class IrisICMMapInferenceNode(Node):
         # Frame history
         self._frame_hist = deque(maxlen=HIST_LEN)
         for _ in range(HIST_LEN):
-            self._frame_hist.append(
-                np.zeros((CAM_H, CAM_W, N_CH), dtype=np.float32))
+            self._frame_hist.append(np.zeros((CAM_H, CAM_W, N_CH), dtype=np.float32))
         
         self._smooth_action = np.zeros(2, dtype=np.float32)
-        
-        # Stats
         self._step_count = 0
-        self._total_visited = 0
+        self._first_pose_received = False
 
-        # ---- QoS for VIO (best effort, reliable) ----
+        # ---- QoS for VIO ----
         vio_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         
         # ---- pub/sub ----
@@ -317,6 +257,7 @@ class IrisICMMapInferenceNode(Node):
             f"Grid: {GRID_N}x{GRID_N} cells @ {GRID_CELL_M}m, "
             f"local crop {LOCAL_MAP_PX}x{LOCAL_MAP_PX}"
         )
+        self.get_logger().info(f"Fallback pose: {self.fallback_pose}")
 
     # ------------------------------------------------------------------
     def _on_depth(self, msg: Image):
@@ -327,7 +268,6 @@ class IrisICMMapInferenceNode(Node):
             return
 
         depth_m = cv_img.astype(np.float32)
-        # 16UC1 depth images (RealSense default) are in millimetres
         if msg.encoding in ("16UC1", "mono16"):
             depth_m = depth_m / 1000.0
 
@@ -343,47 +283,64 @@ class IrisICMMapInferenceNode(Node):
 
     # ------------------------------------------------------------------
     def _on_vio(self, msg: PoseStamped):
-        """Receive VIO pose from /mono_hydra_vio/path."""
         self._pos_x = msg.pose.position.x
         self._pos_y = msg.pose.position.y
         self._pos_z = msg.pose.position.z
         self._last_pose_time = self.get_clock().now()
         self._have_pose = True
+        self._first_pose_received = True
+        self._pose_timeout_warned = False
 
-        # Reset grid if drone has moved significantly (new episode)
+        # Reset grid on large jump
         if hasattr(self, '_last_reset_pos'):
             dx = self._pos_x - self._last_reset_pos[0]
             dy = self._pos_y - self._last_reset_pos[1]
-            if np.sqrt(dx*dx + dy*dy) > 10.0:  # >10m movement = new episode
+            if np.sqrt(dx*dx + dy*dy) > 10.0:
                 self.novelty_builder.reset()
                 self._last_reset_pos = (self._pos_x, self._pos_y)
-                self.get_logger().info(f"Grid reset due to large pose jump ({np.sqrt(dx*dx+dy*dy):.1f}m)")
+                self.get_logger().info(f"Grid reset due to pose jump ({np.sqrt(dx*dx+dy*dy):.1f}m)")
         else:
             self._last_reset_pos = (self._pos_x, self._pos_y)
 
     # ------------------------------------------------------------------
     def _step(self):
-        if not self._have_depth or not self._have_pose:
+        # ── Check depth ──────────────────────────────────────────────────────
+        if not self._have_depth:
+            # Print once to avoid spam
+            if not hasattr(self, '_depth_warned') or not self._depth_warned:
+                self.get_logger().warn("Waiting for depth data...")
+                self._depth_warned = True
             return
+        self._depth_warned = False
 
-        # Check for VIO timeout
+        # ── Check VIO pose ──────────────────────────────────────────────────
         now = self.get_clock().now()
         dt = (now - self._last_pose_time).nanoseconds / 1e9
+        
+        # If we have pose timeout and fallback is enabled, use last known pose
         if dt > self.grid_reset_timeout:
-            if self.reset_on_timeout:
-                self.novelty_builder.reset()
-                self._last_reset_pos = (self._pos_x, self._pos_y)
-                self.get_logger().warn(f"Grid reset due to VIO timeout ({dt:.1f}s)")
-            # Still use last known pose, but warn
-            self.get_logger().debug(f"VIO timeout: {dt:.1f}s")
+            if not self._pose_timeout_warned:
+                self.get_logger().warn(f"VIO timeout ({dt:.1f}s) - using fallback pose")
+                self._pose_timeout_warned = True
+            
+            if self.fallback_pose:
+                # Use last known pose (don't update grid, just use existing position)
+                pass
+            else:
+                return  # Don't publish if no pose and fallback disabled
+        else:
+            self._pose_timeout_warned = False
 
-        # Build observation: depth + novelty map
+        # ── Build observation ────────────────────────────────────────────────
         depth_frame = self._latest_depth[..., np.newaxis]  # (H, W, 1)
         
-        # Update novelty map from VIO pose
-        novelty_crop = self.novelty_builder.update(self._pos_x, self._pos_y)
+        # Update novelty map from VIO pose (or use last known)
+        if self._have_pose or self.fallback_pose:
+            novelty_crop = self.novelty_builder.update(self._pos_x, self._pos_y)
+        else:
+            novelty_crop = np.ones((LOCAL_MAP_PX, LOCAL_MAP_PX), dtype=np.float32)
         
-        # Resize novelty crop to match depth dimensions (64x80)
+        # Resize novelty crop to match depth dimensions
         if novelty_crop.shape != (CAM_H, CAM_W):
             novelty_frame = cv2.resize(
                 novelty_crop, (CAM_W, CAM_H), 
@@ -403,36 +360,36 @@ class IrisICMMapInferenceNode(Node):
         obs = np.stack(list(self._frame_hist), axis=0)  # (T, H, W, 2)
         obs_t = torch.from_numpy(obs).unsqueeze(0).float().to(self.device)
 
-        # Policy inference
+        # ── Policy inference ─────────────────────────────────────────────────
         mean_action = self.policy.act(obs_t).squeeze(0).cpu().numpy()
         raw = np.clip(mean_action, -1.0, 1.0)
 
-        # EMA smoothing (matches training)
+        # EMA smoothing
         self._smooth_action = (ACTION_ALPHA * self._smooth_action +
                                (1.0 - ACTION_ALPHA) * raw)
 
         vx_norm, yaw_norm = self._smooth_action.tolist()
 
-        # Publish
+        # ── Publish ──────────────────────────────────────────────────────────
         msg = Twist()
         msg.linear.x = float(vx_norm)
         msg.angular.z = float(yaw_norm)
         self.pub_action.publish(msg)
 
-        # Stats
+        # ── Stats ────────────────────────────────────────────────────────────
         self._step_count += 1
-        if self._step_count % 100 == 0:
+        if self._step_count % 50 == 0:
             visited = np.sum(self.novelty_builder.visit_count > 0)
             area = visited * (GRID_CELL_M ** 2)
             self.get_logger().info(
                 f"[{self._step_count}] pos=({self._pos_x:.2f}, {self._pos_y:.2f}) "
                 f"action=({vx_norm:.2f}, {yaw_norm:.2f}) "
-                f"visited={visited} cells ({area:.1f}m²)"
+                f"visited={visited} cells ({area:.1f}m²) "
+                f"pose_timeout={dt:.1f}s"
             )
 
     # ------------------------------------------------------------------
     def reset_grid(self):
-        """Public method to manually reset the novelty grid."""
         self.novelty_builder.reset()
         self._last_reset_pos = (self._pos_x, self._pos_y)
         self.get_logger().info("Grid manually reset.")
