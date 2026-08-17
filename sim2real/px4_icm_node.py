@@ -146,15 +146,18 @@ class PX4ICMGuidanceNode(Node):
             yaw_n = 0.0
 
         # ── Action shaping ──────────────────────────────────────────────────────
-        # Amplify forward slightly, dampen yaw
+        # Amplify forward slightly
         vx_n = float(np.clip(vx_n * 1.4, -0.4, 1.0))
+        
+        # Dampen yaw
         yaw_n = float(np.clip(yaw_n * 0.8, -1.0, 1.0))
 
-        # Suppress yaw when moving forward fast
+        # ── FIX: Suppress yaw when moving forward fast ─────────────────────────
+        # This must be done AFTER scaling but BEFORE deadzone
         if vx_n > 0.7:
             yaw_n = 0.0
 
-        # Yaw deadzone
+        # Yaw deadzone (only applies if yaw wasn't suppressed)
         if abs(yaw_n) < 0.6:
             yaw_n = 0.0
 
@@ -167,14 +170,10 @@ class PX4ICMGuidanceNode(Node):
         yaw_rate = yaw_n * self._max_yaw    # rad/s
 
         # ── Rotate body velocity to NED frame using heading ────────────────────
-        # PX4 NED frame: heading = 0 = North, increases clockwise
         if heading_valid:
-            # v_N = v_forward * cos(heading)
-            # v_E = v_forward * sin(heading)
             vn = vx_body * math.cos(heading)
             ve = vx_body * math.sin(heading)
         else:
-            # If heading not available, use body frame (fallback)
             self.get_logger().warn("Heading not valid - using body frame")
             vn = vx_body
             ve = 0.0
