@@ -10,7 +10,7 @@ Subscribes:
         linear.x  in [-1, 1]  → forward body velocity
         angular.z in [-1, 1]  → yaw rate
 
-    /fmu/out/vehicle_local_position - for heading feedback (NED frame)
+    /fmu/out/vehicle_local_position - for heading and altitude feedback (NED frame)
 
 Publishes (to PX4 via uXRCE-DDS):
     /fmu/in/offboard_control_mode  - must publish >2 Hz
@@ -54,7 +54,7 @@ PX4_QOS = QoSProfile(
 class PX4ICMGuidanceNode(Node):
     """
     PX4 guidance node - converts body-frame commands to NED frame.
-    Requires heading feedback from PX4.
+    Includes altitude hold with P-controller.
     """
 
     def __init__(self):
@@ -65,11 +65,23 @@ class PX4ICMGuidanceNode(Node):
         self.declare_parameter("max_yaw_rate_rad_s", 1.0)
         self.declare_parameter("cmd_timeout_s",      0.5)
         self.declare_parameter("setpoint_rate_hz",   20.0)
+        
+        # ── Altitude control parameters ──────────────────────────────────────
+        self.declare_parameter("target_altitude_m",  1.5)
+        self.declare_parameter("altitude_kp",        0.6)
+        self.declare_parameter("max_vz_m_s",         0.5)
+        self.declare_parameter("altitude_deadzone",  0.05)
 
         self._max_fwd   = float(self.get_parameter("max_forward_m_s").value)
         self._max_yaw   = float(self.get_parameter("max_yaw_rate_rad_s").value)
         self._cmd_to    = float(self.get_parameter("cmd_timeout_s").value)
         rate_hz         = float(self.get_parameter("setpoint_rate_hz").value)
+        
+        # Altitude control
+        self._target_alt = float(self.get_parameter("target_altitude_m").value)
+        self._alt_kp     = float(self.get_parameter("altitude_kp").value)
+        self._max_vz     = float(self.get_parameter("max_vz_m_s").value)
+        self._alt_deadzone = float(self.get_parameter("altitude_deadzone").value)
 
         # ── Control state ───────────────────────────────────────────────────────
         self._lock          = threading.Lock()
@@ -77,9 +89,12 @@ class PX4ICMGuidanceNode(Node):
         self._vx_norm       = 0.0
         self._yaw_norm      = 0.0
 
-        # ── Heading from PX4 ───────────────────────────────────────────────────
+        # ── PX4 telemetry ───────────────────────────────────────────────────
         self._heading = 0.0      # radians (NED frame, 0 = North)
         self._heading_valid = False
+        self._altitude = 0.0     # metres (positive up)
+        self._altitude_valid = False
+        self._first_altitude_received = False
 
         # ── ROS publishers ──────────────────────────────────────────────────────
         self._pub_ocm = self.create_publisher(
@@ -105,7 +120,10 @@ class PX4ICMGuidanceNode(Node):
             f"  max_forward  = {self._max_fwd} m/s\n"
             f"  max_yaw_rate = {self._max_yaw} rad/s\n"
             f"  cmd_timeout  = {self._cmd_to}s → hover\n"
-            f"  rate         = {rate_hz} Hz"
+            f"  rate         = {rate_hz} Hz\n"
+            f"  target_alt   = {self._target_alt:.2f} m\n"
+            f"  alt_kp       = {self._alt_kp}\n"
+            f"  max_vz       = {self._max_vz} m/s"
         )
 
     # ── Action subscriber ──────────────────────────────────────────────────────
@@ -118,14 +136,25 @@ class PX4ICMGuidanceNode(Node):
 
     # ── PX4 telemetry ──────────────────────────────────────────────────────────
     def _on_local_pos(self, msg: VehicleLocalPosition):
-        """Receive heading from PX4."""
+        """Receive heading and altitude from PX4."""
         with self._lock:
+            # Heading
             if hasattr(msg, 'heading_valid') and msg.heading_valid:
                 self._heading = float(msg.heading)
                 self._heading_valid = True
             elif hasattr(msg, 'heading'):
                 self._heading = float(msg.heading)
                 self._heading_valid = True
+            
+            # Altitude (z is NED: negative = up)
+            if hasattr(msg, 'z_valid') and msg.z_valid:
+                self._altitude = -float(msg.z)
+                self._altitude_valid = True
+                self._first_altitude_received = True
+            elif hasattr(msg, 'z'):
+                self._altitude = -float(msg.z)
+                self._altitude_valid = True
+                self._first_altitude_received = True
 
     # ── Control loop ──────────────────────────────────────────────────────────
     def _control_loop(self):
@@ -138,6 +167,8 @@ class PX4ICMGuidanceNode(Node):
             yaw_n = self._yaw_norm
             heading = self._heading
             heading_valid = self._heading_valid
+            altitude = self._altitude
+            altitude_valid = self._altitude_valid
             fresh = (time.time() - self._last_cmd_time) < self._cmd_to
 
         # ── Command timeout → hover ──────────────────────────────────────────
@@ -152,12 +183,11 @@ class PX4ICMGuidanceNode(Node):
         # Dampen yaw
         yaw_n = float(np.clip(yaw_n * 0.7, -1.0, 1.0))
 
-        # ── FIX: Suppress yaw when moving forward fast ─────────────────────────
-        # This must be done AFTER scaling but BEFORE deadzone
+        # Suppress yaw when moving forward fast
         if vx_n > 0.7:
             yaw_n = 0.0
 
-        # Yaw deadzone (only applies if yaw wasn't suppressed)
+        # Yaw deadzone
         if abs(yaw_n) < 0.4:
             yaw_n = 0.0
 
@@ -169,18 +199,49 @@ class PX4ICMGuidanceNode(Node):
         vx_body = vx_n * self._max_fwd      # m/s in body frame
         yaw_rate = yaw_n * self._max_yaw    # rad/s
 
+        # ── Altitude control (P-controller) ──────────────────────────────────
+        if altitude_valid:
+            # Calculate altitude error
+            alt_error = self._target_alt - altitude
+            
+            # Apply deadzone to prevent small oscillations
+            if abs(alt_error) < self._alt_deadzone:
+                alt_error = 0.0
+            
+            # P-controller: vz = Kp * error
+            vz_raw = self._alt_kp * alt_error
+            
+            # Clamp vertical velocity
+            vz_ned = -np.clip(vz_raw, -self._max_vz, self._max_vz)
+            
+            # Log altitude if changed significantly
+            if not hasattr(self, '_last_alt_log'):
+                self._last_alt_log = altitude
+            if abs(altitude - self._last_alt_log) > 0.1:
+                self._last_alt_log = altitude
+                self.get_logger().debug(
+                    f"Altitude: {altitude:.2f}m (target: {self._target_alt:.2f}m) | "
+                    f"vz: {vz_ned:.3f} m/s | error: {alt_error:.3f}m"
+                )
+        else:
+            # No altitude feedback - hold steady
+            vz_ned = 0.0
+            if not hasattr(self, '_alt_warned'):
+                self.get_logger().warn("Waiting for altitude data...")
+                self._alt_warned = True
+
         # ── Rotate body velocity to NED frame using heading ────────────────────
         if heading_valid:
             vn = vx_body * math.cos(heading)
             ve = vx_body * math.sin(heading)
         else:
-            self.get_logger().warn("Heading not valid - using body frame")
             vn = vx_body
             ve = 0.0
 
         # ── Publish setpoints ──────────────────────────────────────────────────
         self._publish_ocm()
-        self._publish_setpoint_ned(vn, ve, 0.0, yaw_rate)
+        self._publish_setpoint_ned(vn, ve, vz_ned, yaw_rate)
+
         # ── Debug logging (every 50 loops) ─────────────────────────────────────
         if not hasattr(self, '_debug_counter'):
             self._debug_counter = 0
@@ -190,6 +251,7 @@ class PX4ICMGuidanceNode(Node):
             self.get_logger().info(
                 f"[DEBUG]  vx_n={vx_n:+.2f}  yaw_n={yaw_n:+.2f}  "
                 f"→  vx_body={vx_body:+.3f} m/s  yaw_rate={yaw_rate:+.3f} rad/s  "
+                f"alt={altitude:.2f}m  vz={vz_ned:+.3f} m/s  "
                 f"heading={math.degrees(heading):.1f}°"
             )
 
@@ -211,7 +273,6 @@ class PX4ICMGuidanceNode(Node):
     def _publish_setpoint_ned(self, vn: float, ve: float, vz: float, yaw_rate: float):
         """
         Publish velocity setpoint in NED frame.
-        This is what PX4 expects for TrajectorySetpoint.
         """
         nan = float("nan")
         msg = TrajectorySetpoint()
@@ -242,14 +303,16 @@ class PX4ICMGuidanceNode(Node):
             vx_n = self._vx_norm
             yaw_n = self._yaw_norm
             heading_deg = math.degrees(self._heading) if self._heading_valid else 0.0
+            alt = self._altitude if self._altitude_valid else 0.0
             age = time.time() - self._last_cmd_time
 
-        # self.get_logger().info(
-        #     f"[GUIDANCE]  "
-        #     f"vx_n={vx_n:+.2f}  yaw_n={yaw_n:+.2f}  "
-        #     f"heading={heading_deg:.1f}°  "
-        #     f"cmd_age={age:.2f}s"
-        # )
+        self.get_logger().info(
+            f"[GUIDANCE]  "
+            f"vx_n={vx_n:+.2f}  yaw_n={yaw_n:+.2f}  "
+            f"alt={alt:.2f}/{self._target_alt:.2f}m  "
+            f"heading={heading_deg:.1f}°  "
+            f"cmd_age={age:.2f}s"
+        )
 
     # ── Cleanup ────────────────────────────────────────────────────────────────
     def shutdown(self):
