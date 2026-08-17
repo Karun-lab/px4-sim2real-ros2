@@ -150,7 +150,7 @@ class PX4ICMGuidanceNode(Node):
         vx_n = float(np.clip(vx_n * 1.4, -0.4, 1.0))
         
         # Dampen yaw
-        yaw_n = float(np.clip(yaw_n * 0.8, -1.0, 1.0))
+        yaw_n = float(np.clip(yaw_n * 0.7, -1.0, 1.0))
 
         # ── FIX: Suppress yaw when moving forward fast ─────────────────────────
         # This must be done AFTER scaling but BEFORE deadzone
@@ -158,11 +158,11 @@ class PX4ICMGuidanceNode(Node):
             yaw_n = 0.0
 
         # Yaw deadzone (only applies if yaw wasn't suppressed)
-        if abs(yaw_n) < 0.6:
+        if abs(yaw_n) < 0.4:
             yaw_n = 0.0
 
         # Minimum forward nudge when not yawing
-        if abs(yaw_n) < 0.7 and vx_n < 0.2 and vx_n > 0:
+        if abs(yaw_n) < 0.7 and vx_n < 0.2:
             vx_n = 0.2
 
         # ── Convert to physical units ──────────────────────────────────────────
