@@ -61,14 +61,14 @@ class PX4ICMGuidanceNode(Node):
         super().__init__("px4_icm_guidance")
 
         # ── Parameters ──────────────────────────────────────────────────────────
-        self.declare_parameter("max_forward_m_s",    0.5)
+        self.declare_parameter("max_forward_m_s",    0.6)
         self.declare_parameter("max_yaw_rate_rad_s", 1.0)
         self.declare_parameter("cmd_timeout_s",      0.5)
         self.declare_parameter("setpoint_rate_hz",   20.0)
         
         # ── Altitude control parameters ──────────────────────────────────────
         self.declare_parameter("target_altitude_m",  1.5)
-        self.declare_parameter("altitude_kp",        0.6)
+        self.declare_parameter("altitude_kp",        0.5)
         self.declare_parameter("max_vz_m_s",         0.5)
         self.declare_parameter("altitude_deadzone",  0.05)
 
