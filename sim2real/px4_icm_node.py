@@ -61,7 +61,7 @@ class PX4ICMGuidanceNode(Node):
         super().__init__("px4_icm_guidance")
 
         # ── Parameters ──────────────────────────────────────────────────────────
-        self.declare_parameter("max_forward_m_s",    0.6)
+        self.declare_parameter("max_forward_m_s",    0.8)
         self.declare_parameter("max_yaw_rate_rad_s", 1.0)
         self.declare_parameter("cmd_timeout_s",      0.5)
         self.declare_parameter("setpoint_rate_hz",   20.0)
@@ -184,11 +184,11 @@ class PX4ICMGuidanceNode(Node):
         yaw_n = float(np.clip(yaw_n * 0.7, -1.0, 1.0))
 
         # Suppress yaw when moving forward fast
-        if vx_n > 0.7:
+        if vx_n > 0.6:
             yaw_n = 0.0
 
         # Yaw deadzone
-        if abs(yaw_n) < 0.4:
+        if abs(yaw_n) < 0.5:
             yaw_n = 0.0
 
         # Minimum forward nudge when not yawing
