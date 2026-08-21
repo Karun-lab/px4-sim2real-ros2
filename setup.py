@@ -47,6 +47,7 @@ setup(
             "px4_joystick_commander=sim2real.px4_joystick_commander:main",
             "iris_icm_inference_node=sim2real.iris_icm_inference_node:main",
             "icm_inference_patched2=sim2real.icm_inference_patched2:main",
+            "mapping=sim2real.mapping:main",
         ],
     },
 )
